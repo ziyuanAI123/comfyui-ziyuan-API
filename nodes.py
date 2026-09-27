@@ -286,7 +286,7 @@ class ZiyuanQiaomoNode(ZiyuanVideoNode):
         inputs["required"]["比例"] = (["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"] +
                                      (["自动"] if cls.MODEL == SEEDANCE_MINI_MODEL else []), {"default": "16:9"})
         inputs["required"]["分辨率"] = (cls.RESOLUTIONS, {"default": "720p"})
-        inputs["required"]["时长秒数"] = ("INT", {"default": 4, "min": 4, "max": 15})
+        inputs["required"]["时长秒数"] = ("INT", {"default": 4, "min": 4, "max": 30 if cls.MODEL == "doubao-seedance-2.5" else 15})
         inputs["required"]["生成声音"] = ("BOOLEAN", {"default": True})
         # Keep widget names/order so saved Mini workflows retain their values.
         inputs["optional"] = {
