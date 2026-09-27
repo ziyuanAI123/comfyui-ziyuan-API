@@ -1,74 +1,20 @@
 {
-  "last_node_id": 2,
+  "last_node_id": 1,
   "last_link_id": 0,
   "nodes": [
     {
       "id": 1,
-      "type": "ZiyuanImageNode",
+      "type": "ZiyuanUnifiedVideoNode",
       "pos": [
         60,
         60
       ],
       "size": [
-        390,
+        420,
         440
       ],
       "flags": {},
       "order": 0,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "参考图1",
-          "type": "IMAGE",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "图像",
-          "type": "IMAGE",
-          "links": null,
-          "slot_index": 0
-        },
-        {
-          "name": "状态",
-          "type": "STRING",
-          "links": null,
-          "slot_index": 1
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "ZiyuanImageNode"
-      },
-      "widgets_values": [
-        "",
-        "gpt-image-2",
-        "自动",
-        "2K",
-        "自动",
-        "自动",
-        1,
-        0,
-        "randomize",
-        1200,
-        "",
-        "https://ziyuanai.cn",
-        true
-      ]
-    },
-    {
-      "id": 2,
-      "type": "ZiyuanUnifiedVideoNode",
-      "pos": [
-        540,
-        60
-      ],
-      "size": [
-        390,
-        440
-      ],
-      "flags": {},
-      "order": 1,
       "mode": 0,
       "inputs": [
         {
@@ -136,7 +82,7 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.8,
+      "scale": 0.6,
       "offset": [
         30,
         30

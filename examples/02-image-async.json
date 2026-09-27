@@ -1,10 +1,10 @@
 {
   "last_node_id": 2,
-  "last_link_id": 0,
+  "last_link_id": 1,
   "nodes": [
     {
       "id": 1,
-      "type": "ZiyuanImageNode",
+      "type": "ZiyuanImageSubmitNode",
       "pos": [
         60,
         60
@@ -25,20 +25,16 @@
       ],
       "outputs": [
         {
-          "name": "图像",
-          "type": "IMAGE",
-          "links": null,
-          "slot_index": 0
-        },
-        {
-          "name": "状态",
+          "name": "任务编号",
           "type": "STRING",
-          "links": null,
-          "slot_index": 1
+          "links": [
+            1
+          ],
+          "slot_index": 0
         }
       ],
       "properties": {
-        "Node name for S&R": "ZiyuanImageNode"
+        "Node name for S&R": "ZiyuanImageSubmitNode"
       },
       "widgets_values": [
         "",
@@ -58,80 +54,55 @@
     },
     {
       "id": 2,
-      "type": "ZiyuanUnifiedVideoNode",
+      "type": "ZiyuanImageFetchNode",
       "pos": [
         540,
         60
       ],
       "size": [
         390,
-        440
+        110
       ],
       "flags": {},
       "order": 1,
       "mode": 0,
       "inputs": [
         {
-          "name": "参考图1",
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "name": "参考音频1",
-          "type": "AUDIO",
-          "link": null
-        },
-        {
-          "name": "参考视频1",
-          "type": "VIDEO",
-          "link": null
+          "name": "任务编号",
+          "type": "STRING",
+          "link": 1
         }
       ],
       "outputs": [
         {
-          "name": "视频",
-          "type": "VIDEO",
+          "name": "图像",
+          "type": "IMAGE",
           "links": null,
           "slot_index": 0
-        },
-        {
-          "name": "文件路径",
-          "type": "STRING",
-          "links": null,
-          "slot_index": 1
         },
         {
           "name": "状态",
           "type": "STRING",
           "links": null,
-          "slot_index": 2
+          "slot_index": 1
         }
       ],
       "properties": {
-        "Node name for S&R": "ZiyuanUnifiedVideoNode"
+        "Node name for S&R": "ZiyuanImageFetchNode"
       },
-      "widgets_values": [
-        "",
-        "doubao-seedance-2.0-mini",
-        "16:9",
-        "720p",
-        4,
-        3,
-        0,
-        "randomize",
-        1800,
-        "",
-        "https://ziyuanai.cn",
-        true,
-        true,
-        "组合参考",
-        "",
-        "",
-        ""
-      ]
+      "widgets_values": []
     }
   ],
-  "links": [],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "STRING"
+    ]
+  ],
   "groups": [],
   "config": {},
   "extra": {
