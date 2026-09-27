@@ -517,7 +517,7 @@ class PluginTests(unittest.TestCase):
                 self.assertEqual(profile["resolutions"], resolutions)
                 self.assertEqual((profile["images"], profile["videos"], profile["audio_limit"]),
                                  (images, videos, 10 if model == "doubao-seedance-2.5" else 3))
-                self.assertEqual(profile["duration"], {"default": 4, "min": 4, "max": 15})
+                self.assertEqual(profile["duration"], {"default": 4, "min": 4, "max": 30 if model == "doubao-seedance-2.5" else 15})
                 self.assertTrue(profile["sound"])
                 self.assertEqual("自动" in profile["ratios"], model == api.SEEDANCE_MINI_MODEL)
         for model in ("seedance-2.5v5", "seedance-2.0-fast-1080p", "jimeng-2.5-480p", "jimeng-2.5-720p"):
@@ -529,6 +529,35 @@ class PluginTests(unittest.TestCase):
                     self.assertIn(node["widgets_values"][1], expected)
                     self.assertEqual(node["widgets_values"][13:], ["组合参考", "", "", ""])
         self.assertEqual(self.server.calls, [])
+
+    def test_qiaomo25_duration_sync_async_requests_and_boundaries(self):
+        def generate(prompt, key, base, timeout, seed, model, size, seconds, **kwargs):
+            payload = nodes.VIDEO_NODES[model]().build_payload(prompt, model, size, seconds, [], **kwargs)
+            return self.client.generate("video", payload)
+
+        with patch.object(nodes.ZiyuanQiaomo25Node, "generate", side_effect=generate), patch.object(nodes, "check_cancel"):
+            for asynchronous in (False, True):
+                for seconds in (4, 15, 16, 30):
+                    self.respond({"id": "duration-test", "status": "completed"})
+                    options = self.video_options("doubao-seedance-2.5") | {"时长秒数": seconds}
+                    if asynchronous:
+                        task, = nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
+                        nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
+                    else:
+                        nodes.ZiyuanUnifiedVideoNode().run(**options)
+                    self.assertEqual(self.server.calls[-1][1], "/v1/videos")
+                    self.assertEqual(self.server.calls[-1][2]["seconds"], str(seconds))
+                for model, seconds in (("doubao-seedance-2.5", 31), ("doubao-seedance-2.0", 30),
+                                       (api.SEEDANCE_MINI_MODEL, 30)):
+                    options = self.video_options(model) | {"时长秒数": seconds}
+                    before = len(self.server.calls)
+                    with self.assertRaisesRegex(ValueError, "不支持所选时长"):
+                        if asynchronous:
+                            task, = nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
+                            nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
+                        else:
+                            nodes.ZiyuanUnifiedVideoNode().run(**options)
+                    self.assertEqual(len(self.server.calls), before)
 
     def test_qiaomo_all_controls_json_and_actual_relay_contract(self):
         cases = []
@@ -611,7 +640,7 @@ for (const input of JSON.parse(fs.readFileSync(0, 'utf8'))) {
 
     def test_qiaomo_validation_prevents_submit(self):
         for model in api.QIAOMO_MODELS:
-            for change in ({"时长秒数": 3}, {"时长秒数": 16}, {"时长秒数": True}, {"时长秒数": 4.5},
+            for change in ({"时长秒数": 3}, {"时长秒数": 31 if model == "doubao-seedance-2.5" else 16}, {"时长秒数": True}, {"时长秒数": 4.5},
                            {"比例": "2:3"}, {"分辨率": "4K"}, {"生成声音": "false"},
                            {"参考图15": torch.zeros((1, 2, 2, 3))}, {"参考音频1": {}}, {"参考音频10": {}},
                            {"Mini素材模式": "首尾帧"}, {"Mini音频链接": "https://assets.test/a.wav"},

@@ -9,7 +9,7 @@ const profiles = {
     omni: { ratios: ["自动", "16:9", "9:16", "1:1", "4:3"], resolutions: ["720p", "1080p"], duration: { min: 1, max: 60, default: 5 }, images: 14, audio_limit: 0, videos: 0, sound: false },
     full: { ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], resolutions: ["720p", "480p", "1080p", "4k"], duration: { min: 4, max: 15, default: 4 }, images: 9, audio_limit: 3, videos: 3, sound: true, qiaomo: true },
     mini: { ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "自动"], resolutions: ["720p"], duration: { min: 4, max: 15, default: 4 }, images: 9, audio_limit: 3, videos: 3, sound: true, qiaomo: true },
-    newer: { ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], resolutions: ["720p", "480p", "1080p"], duration: { min: 4, max: 15, default: 4 }, images: 12, audio_limit: 10, videos: 12, sound: true, qiaomo: true },
+    newer: { ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], resolutions: ["720p", "480p", "1080p"], duration: { min: 4, max: 30, default: 4 }, images: 12, audio_limit: 10, videos: 12, sound: true, qiaomo: true },
 };
 
 function createNode(nodeName) {
@@ -93,7 +93,7 @@ for (const type of ["ZiyuanUnifiedVideoNode", "ZiyuanUnifiedVideoSubmitNode"]) {
             assert.deepEqual(names(node), ["参考图1", "参考音频1", "参考视频1"]);
             assert.deepEqual(widget(node, "分辨率").options.values, profiles[model].resolutions);
             assert.deepEqual(widget(node, "比例").options.values, profiles[model].ratios);
-            assert.deepEqual(widget(node, "时长秒数").options.values, Array.from({length: 12}, (_, i) => i + 4));
+            assert.deepEqual(widget(node, "时长秒数").options.values, Array.from({length: model === "newer" ? 27 : 12}, (_, i) => i + 4));
             assert.equal(widget(node, "时长秒数").value, 4);
             assert.equal(widget(node, "生成声音").hidden, false);
             assert.equal(widget(node, "Mini素材模式").hidden, false);
@@ -280,7 +280,12 @@ for (const nodeType of ["ZiyuanUnifiedVideoNode", "ZiyuanUnifiedVideoSubmitNode"
         await disconnect(node, "参考音频2");
         assert.equal(node.inputs.find(i => i.name === "参考音频2").link, 3);
         assert.equal(node.inputs.find(i => i.name === "参考音频10").link, null);
+        widget(node, "时长秒数").value = 30;
+        node.onConfigure();
+        await Promise.resolve();
+        assert.equal(widget(node, "时长秒数").value, 30);
         await select(node, "full");
+        assert.equal(widget(node, "时长秒数").value, 4);
         assert.match(node.inputs.find(i => i.name === "参考音频4").label, /请断开/);
         widget(node, "Mini素材模式").value = "首尾帧";
         widget(node, "Mini素材模式").callback("首尾帧");
