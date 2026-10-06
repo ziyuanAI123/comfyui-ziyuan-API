@@ -125,11 +125,52 @@ class PluginTests(unittest.TestCase):
                     _, path, body, _ = self.server.calls[-1]
                     self.assertEqual(path, "/v1/images/edits" if reference else "/v1/images/generations")
                     self.assertEqual(body["model"], model)
-                    self.assertEqual(body["n"], 1)
-                    self.assertEqual("image" in body, reference)
+                    self.assertEqual(body["n"], "1" if reference else 1)
+                    self.assertNotIn("image", body)
+                    self.assertEqual("files" in body, reference)
+                    if reference:
+                        field, filename, mime, raw = body["files"][0]
+                        self.assertEqual(len(body["files"]), 1)
+                        self.assertEqual((field, filename, mime), ("image", "reference-1.png", "image/png"))
+                        with Image.open(io.BytesIO(raw)) as uploaded:
+                            self.assertEqual(uploaded.size, (8, 6))
+                            self.assertEqual(uploaded.getpixel((0, 0)), (0, 0, 0))
                     self.assertEqual(tuple(tensor.shape), (1, 6, 8, 3))
                     self.assertIn(model, status)
         self.assertEqual(len(self.server.calls), 4)
+
+    def test_super_reference_multipart_polling_and_order(self):
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 6), "blue").save(buffer, "PNG")
+        second_png = buffer.getvalue()
+        self.respond({"task_id": "super-1", "status": "queued"},
+                     {"status": "completed", "data": [{"b64_json": self.b64}]})
+        payload = {"model": "gpt-image-2-super", "prompt": "edit", "n": 2,
+                   "size": "1024x1024", "quality": "auto", "response_format": "url",
+                   "image": ["data:image/png;base64," + base64.b64encode(raw).decode()
+                             for raw in (self.png, second_png)]}
+        original = json.loads(json.dumps(payload))
+        with patch.object(api.time, "sleep"):
+            sources, task_id = self.client.generate("image", payload)
+        self.assertEqual(payload, original)
+        self.assertEqual(task_id, "super-1")
+        self.assertEqual(sources, [self.b64])
+        method, path, body, auth = self.server.calls[0]
+        self.assertEqual((method, path, auth), ("POST", "/v1/images/edits", "Bearer test-key"))
+        self.assertEqual({key: value for key, value in body.items() if key != "files"},
+                         {key: str(value) for key, value in payload.items() if key != "image"})
+        self.assertEqual(body["files"], [("image[]", f"reference-{i}.png", "image/png", raw)
+                                          for i, raw in enumerate((self.png, second_png), 1)])
+        self.assertEqual([call[:2] for call in self.server.calls],
+                         [("POST", "/v1/images/edits"), ("GET", "/v1/images/super-1")])
+
+    def test_super_reference_failure_does_not_resubmit(self):
+        self.respond({"error": {"message": "images[].image_url is required"}})
+        with self.assertRaisesRegex(RuntimeError, r"image_url is required"):
+            self.client.generate("image", {"model": "gpt-image-2-super", "prompt": "edit",
+                                          "image": "data:image/png;base64," + self.b64})
+        self.assertEqual(len(self.server.calls), 1)
+        self.assertIn("files", self.server.calls[0][2])
 
     def test_duplicate_image_results_preserve_batch_count(self):
         self.respond({"data": [{"b64_json": self.b64}, {"b64_json": self.b64}]})
