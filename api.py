@@ -132,6 +132,19 @@ class ZiyuanClient:
             "/v1/images/edits" if payload.get("image") else "/v1/images/generations"
         )
         files = None
+        if kind == "image" and payload.get("model") == "gpt-image-2-super" and payload.get("image"):
+            references = payload["image"]
+            if isinstance(references, str):
+                references = [references]
+            # Qiaomo documents file uploads for /v1/images/edits, not JSON image data URIs.
+            field = "image" if len(references) == 1 else "image[]"
+            files = []
+            for index, source in enumerate(references, 1):
+                if not source.startswith("data:image/png;base64,"):
+                    raise ValueError("Super 参考图必须由 IMAGE 输入提供。")
+                raw = base64.b64decode(source.split(",", 1)[1], validate=True)
+                files.append((field, (f"reference-{index}.png", raw, "image/png")))
+            payload = {key: value for key, value in payload.items() if key != "image"}
         if kind == "video" and payload.get("model") in QIAOMO_MODELS:
             files = []
             for index, source in enumerate(payload.get("images", []), 1):
