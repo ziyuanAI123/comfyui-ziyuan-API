@@ -10,7 +10,7 @@ from urllib.parse import quote, urljoin, urlsplit
 import requests
 
 
-IMAGE_MODELS = ("gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst")
+IMAGE_MODELS = ("gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2-super")
 VIDEO_MODEL = "omni-flash-components"
 SEEDANCE_MINI_MODEL = "doubao-seedance-2.0-mini"
 QIAOMO_MODELS = ("doubao-seedance-2.0", SEEDANCE_MINI_MODEL, "doubao-seedance-2.5")
