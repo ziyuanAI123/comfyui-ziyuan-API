@@ -103,6 +103,33 @@ class PluginTests(unittest.TestCase):
                 self.assertAlmostEqual(tensor[0, 0, 0, 0].item(), 1)
                 self.assertIn(model, status)
                 self.assertEqual(self.server.calls[-1][1], "/v1/images/generations")
+                self.assertEqual(self.server.calls[-1][2]["model"], model)
+
+    def test_super_image_normal_async_and_reference_requests(self):
+        model = "gpt-image-2-super"
+        for cls in (nodes.ZiyuanImageNode, nodes.ZiyuanImageSubmitNode):
+            self.assertIn(model, cls.INPUT_TYPES()["required"]["模型"][0])
+        for asynchronous in (False, True):
+            for reference in (False, True):
+                with self.subTest(asynchronous=asynchronous, reference=reference):
+                    self.respond({"data": [{"b64_json": self.b64}]})
+                    options = self.image_options() | {"模型": model}
+                    if reference:
+                        options["参考图1"] = torch.zeros((1, 6, 8, 3))
+                    with patch.object(nodes, "check_cancel"):
+                        if asynchronous:
+                            task, = nodes.ZiyuanImageSubmitNode().submit(**options)
+                            tensor, status = nodes.ZiyuanImageFetchNode().fetch(task)
+                        else:
+                            tensor, status = nodes.ZiyuanImageNode().run(**options)
+                    _, path, body, _ = self.server.calls[-1]
+                    self.assertEqual(path, "/v1/images/edits" if reference else "/v1/images/generations")
+                    self.assertEqual(body["model"], model)
+                    self.assertEqual(body["n"], 1)
+                    self.assertEqual("image" in body, reference)
+                    self.assertEqual(tuple(tensor.shape), (1, 6, 8, 3))
+                    self.assertIn(model, status)
+        self.assertEqual(len(self.server.calls), 4)
 
     def test_duplicate_image_results_preserve_batch_count(self):
         self.respond({"data": [{"b64_json": self.b64}, {"b64_json": self.b64}]})
