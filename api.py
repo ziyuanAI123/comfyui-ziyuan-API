@@ -10,7 +10,9 @@ from urllib.parse import quote, urljoin, urlsplit
 import requests
 
 
-IMAGE_MODELS = ("gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2-super")
+BANANA_MODELS = ("T香蕉2", "T香蕉2.1", "T香蕉pro")
+BANANA_RATIOS = ("1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9")
+IMAGE_MODELS = ("gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2-super", *BANANA_MODELS)
 VIDEO_MODEL = "omni-flash-components"
 SEEDANCE_MINI_MODEL = "doubao-seedance-2.0-mini"
 QIAOMO_MODELS = ("doubao-seedance-2.0", SEEDANCE_MINI_MODEL, "doubao-seedance-2.5")
@@ -51,6 +53,18 @@ def media_sources(body):
                     sources = visit(item)
                     if sources:
                         return sources
+            sources = []
+            for candidate in value.get("candidates", []):
+                for part in candidate.get("content", {}).get("parts", []):
+                    if part.get("thought"):
+                        continue
+                    inline = part.get("inlineData", part.get("inline_data", {}))
+                    mime = inline.get("mimeType", inline.get("mime_type", ""))
+                    if mime.startswith("image/") and inline.get("data"):
+                        sources.append(f"data:{mime};base64,{inline['data']}")
+                    elif str(part.get("text", "")).strip().startswith(("https://", "http://")):
+                        sources.append(part["text"].strip())
+            return sources
         elif isinstance(value, str) and value.startswith(("https://", "http://", "data:", "/")):
             return [value]
         return []
@@ -188,7 +202,7 @@ class ZiyuanClient:
                 # Short waits allow ComfyUI's Cancel button to interrupt polling.
                 for _ in range(max(1, int(self.poll_interval * 2))):
                     time.sleep(min(0.5, self._remaining()))
-                path = "videos" if kind == "video" else "images"
+                path = "videos" if kind == "video" else ("images/tasks" if payload.get("model") in BANANA_MODELS else "images")
                 body = self._json("GET", f"/v1/{path}/{quote(str(task_id), safe='')}")
         except (RuntimeError, TimeoutError) as exc:
             raise type(exc)(f"{exc}\n任务 ID：{task_id or '未返回'}") from exc

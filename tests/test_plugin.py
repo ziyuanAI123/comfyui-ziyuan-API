@@ -93,12 +93,79 @@ class PluginTests(unittest.TestCase):
     def respond(self, *bodies):
         self.server.responses.extend((200, {}, body) for body in bodies)
 
+    def test_mentions_map_socket_batches_to_actual_upload_ordinals(self):
+        inputs = {"参考图1": torch.zeros((2, 6, 8, 3)), "参考图2": torch.ones((1, 6, 8, 3)),
+                  "参考音频1": self.audio_input(batch=2), "参考音频2": self.audio_input(),
+                  "参考视频2": object()}
+        prompt = "@图1 的背景，@图片2 的人物，@音频2 的节奏和@视频2 的动作；email@example.com"
+        self.assertEqual(nodes.resolve_prompt_references(prompt, inputs, 3, 1, 3),
+                         "（第1至2张参考图片） 的背景，（第3张参考图片） 的人物，（第3段参考音频） 的节奏和（第1段参考视频） 的动作；email@example.com")
+        self.assertEqual(nodes.resolve_prompt_references("@图2", {}, 2), "（第2张参考图片）")
+        with self.assertRaisesRegex(ValueError, "没有对应"):
+            nodes.resolve_prompt_references("@图3", inputs, 3, 1, 3)
+
+    def test_image_mentions_reach_json_and_multipart_with_matching_media(self):
+        for model in (api.IMAGE_MODELS[0], "gpt-image-2-super"):
+            for asynchronous in (False, True):
+                self.respond({"data": [{"b64_json": self.b64}]})
+                options = self.image_options() | {"模型": model, "提示词": "让@图2 进入@图1 的场景",
+                    "参考图1": torch.zeros((2, 6, 8, 3)), "参考图2": torch.ones((1, 6, 8, 3))}
+                with patch.object(nodes, "check_cancel"):
+                    if asynchronous:
+                        task, = nodes.ZiyuanImageSubmitNode().submit(**options)
+                        nodes.ZiyuanImageFetchNode().fetch(task)
+                    else:
+                        nodes.ZiyuanImageNode().run(**options)
+                body = self.server.calls[-1][2]
+                self.assertEqual(body["prompt"], "让（第3张参考图片） 进入（第1至2张参考图片） 的场景")
+                if model == "gpt-image-2-super":
+                    images = [raw for _, _, _, raw in body["files"]]
+                else:
+                    images = [base64.b64decode(url.split(",", 1)[1]) for url in body["image"]]
+                self.assertEqual(len(images), 3)
+                self.assertEqual(Image.open(io.BytesIO(images[2])).getpixel((0, 0)), (255, 255, 255))
+
+    def test_video_mentions_reach_multipart_and_legacy_url_payload(self):
+        model = api.SEEDANCE_MINI_MODEL
+        inputs = {"参考图1": torch.zeros((2, 6, 8, 3)), "参考图2": torch.ones((1, 6, 8, 3)),
+                  "参考音频1": self.audio_input(batch=2), "参考音频2": self.audio_input()}
+        refs = nodes.collect_references(inputs)
+        payload = nodes.ZiyuanSeedanceMiniNode().build_payload("@图2 跟随@音频2", model, "", 4, refs,
+                    _resolution="720p", _aspect_ratio="16:9", **inputs)
+        self.respond({"url": "https://example.test/result.mp4"})
+        self.client.generate("video", payload)
+        body = self.server.calls[-1][2]
+        self.assertEqual(body["prompt"], "（第3张参考图片） 跟随（第3段参考音频）")
+        self.assertEqual([field for field, _, _, _ in body["files"]], ["input_reference"] * 3 + ["input_audio"] * 3)
+        legacy = nodes.ZiyuanSeedanceMiniNode().build_payload("@图2 与@音频1", model, "", 4, [],
+            _resolution="720p", _aspect_ratio="16:9", Mini图片链接="asset://one\nasset://two", Mini音频链接="asset://song")
+        self.assertEqual(legacy["prompt"], "（第2张参考图片） 与（第1段参考音频）")
+        omni = nodes.ZiyuanVideoNode().build_payload("@图2", api.VIDEO_MODEL, "1280x720", 5, refs, **inputs)
+        self.assertEqual(omni["prompt"], "（第3张参考图片）")
+
+    def test_missing_or_disconnected_mentions_never_submit(self):
+        for prompt in ("@图0", "@图2", "@视频1", "@音频1", "@已断开(图1)"):
+            options = self.image_options() | {"提示词": prompt, "参考图1": torch.zeros((1, 6, 8, 3))}
+            with patch.object(nodes, "check_cancel"):
+                with self.assertRaises(ValueError):
+                    nodes.ZiyuanImageNode().run(**options)
+                task, = nodes.ZiyuanImageSubmitNode().submit(**options)
+                with self.assertRaises((RuntimeError, ValueError)):
+                    nodes.ZiyuanImageFetchNode().fetch(task)
+                with self.assertRaises(ValueError):
+                    nodes.ZiyuanUnifiedVideoNode().run(**(self.video_options() | {"提示词": prompt}))
+                task, = nodes.ZiyuanUnifiedVideoSubmitNode().submit(**(self.video_options() | {"提示词": prompt}))
+                with self.assertRaises((RuntimeError, ValueError)):
+                    nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
+        self.assertEqual(self.server.calls, [])
+
     def test_each_image_model_parses_real_png(self):
         for model in api.IMAGE_MODELS:
             with self.subTest(model=model):
                 self.respond({"data": [{"b64_json": self.b64}]})
                 with patch.object(nodes, "check_cancel"):
-                    tensor, status = nodes.ZiyuanImageNode().generate("test", "test-key", self.base, 30, 0, model, "8x6", 1)
+                    tensor, status = nodes.ZiyuanImageNode().generate("test", "test-key", self.base, 30, 0, model,
+                                                                   "4:3" if model in api.BANANA_MODELS else "8x6", 1)
                 self.assertEqual(tuple(tensor.shape), (1, 6, 8, 3))
                 self.assertAlmostEqual(tensor[0, 0, 0, 0].item(), 1)
                 self.assertIn(model, status)
@@ -212,6 +279,76 @@ class PluginTests(unittest.TestCase):
                 nodes.ZiyuanImageNode().run(**(self.image_options() | {"生成数量": count}))
         self.assertEqual(self.server.calls, [])
 
+    def test_banana_models_sync_async_parameters_references_and_polling(self):
+        for model in api.BANANA_MODELS:
+            for asynchronous in (False, True):
+                for resolution in ("1K", "2K", "4K"):
+                    with self.subTest(model=model, asynchronous=asynchronous, resolution=resolution):
+                        self.server.calls = []
+                        self.respond({"task_id": "banana/1", "status": "queued"},
+                                     {"status": "processing", "url": "/preview.png"},
+                                     {"status": "succeeded", "result": {"candidates": [{"content": {"parts": [
+                                         {"inlineData": {"mimeType": "image/png", "data": self.b64}}
+                                     ]}}]}})
+                        options = self.image_options() | {"模型": model, "分辨率": resolution, "比例": "9:16",
+                            "提示词": "@图2 的人物和@图1 的背景", "质量": "高", "输出格式": "webp",
+                            "参考图1": torch.zeros((2, 6, 8, 3)), "参考图2": torch.ones((1, 6, 8, 3))}
+                        with patch.object(nodes, "check_cancel"), patch.object(api.time, "sleep"):
+                            if asynchronous:
+                                task, = nodes.ZiyuanImageSubmitNode().submit(**options)
+                                tensor, status = nodes.ZiyuanImageFetchNode().fetch(task)
+                                nodes.ZiyuanImageFetchNode().fetch(task)
+                            else:
+                                tensor, status = nodes.ZiyuanImageNode().run(**options)
+                        self.assertEqual(tuple(tensor.shape), (1, 6, 8, 3))
+                        self.assertIn(model, status)
+                        self.assertEqual([(call[0], call[1]) for call in self.server.calls], [
+                            ("POST", "/v1/images/edits"), ("GET", "/v1/images/tasks/banana%2F1"),
+                            ("GET", "/v1/images/tasks/banana%2F1")])
+                        body = self.server.calls[0][2]
+                        self.assertEqual({key: body[key] for key in ("model", "size", "quality", "n")},
+                                         dict(model=model, size="9:16", quality=resolution, n=1))
+                        self.assertNotIn("output_format", body)
+                        self.assertEqual(body["prompt"], "（第3张参考图片） 的人物和（第1至2张参考图片） 的背景")
+                        self.assertEqual(len(body["image"]), 3)
+                        image = Image.open(io.BytesIO(base64.b64decode(body["image"][2].split(",", 1)[1])))
+                        self.assertEqual(image.getpixel((0, 0)), (255, 255, 255))
+
+    def test_banana_text_generation_auto_and_fixed_ratios(self):
+        for model in api.BANANA_MODELS:
+            for ratio in api.BANANA_RATIOS:
+                self.respond({"data": [{"b64_json": self.b64}]})
+                with patch.object(nodes, "check_cancel"):
+                    nodes.ZiyuanImageNode().run(**(self.image_options() | {"模型": model, "比例": ratio}))
+                self.assertEqual(self.server.calls[-1][1], "/v1/images/generations")
+                self.assertEqual(self.server.calls[-1][2]["size"], ratio)
+        for refs, expected in (({}, "1:1"), ({"参考图1": torch.zeros((1, 16, 9, 3))}, "9:16"),
+                               ({"参考图1": torch.zeros((1, 6, 8, 3))}, "4:3")):
+            self.respond({"data": [{"b64_json": self.b64}]})
+            with patch.object(nodes, "check_cancel"):
+                nodes.ZiyuanImageNode().run(**(self.image_options() | {"模型": "T香蕉2", "比例": "自动"} | refs))
+            self.assertEqual(self.server.calls[-1][2]["size"], expected)
+
+    def test_banana_invalid_options_and_failed_task_do_not_resubmit(self):
+        for model in api.BANANA_MODELS:
+            for overrides in ({"生成数量": 2}, {"比例": "21:9"}, {"分辨率": "8K"}):
+                with self.assertRaises(ValueError):
+                    nodes.ZiyuanImageNode().run(**(self.image_options() | {"模型": model} | overrides))
+        self.assertEqual(self.server.calls, [])
+        self.respond({"task_id": "failed-banana", "status": "queued"},
+                     {"status": "failed", "message": "provider rejected", "url": "/preview.png"})
+        with patch.object(api.time, "sleep"), self.assertRaisesRegex(RuntimeError, "provider rejected.*\n任务 ID：failed-banana"):
+            self.client.generate("image", {"model": "T香蕉pro", "prompt": "test", "n": 1, "size": "1:1", "quality": "1K"})
+        self.assertEqual([call[0] for call in self.server.calls], ["POST", "GET"])
+
+    def test_gemini_image_outputs_exclude_echoed_inputs_thoughts_and_aliases(self):
+        candidate = {"content": {"parts": [
+            {"thought": True, "inlineData": {"mimeType": "image/png", "data": "preview"}},
+            {"text": "Generated image"}, {"inline_data": {"mime_type": "image/png", "data": self.b64}}]}}
+        self.assertEqual(api.media_sources({"contents": [candidate]}), [])
+        self.assertEqual(api.media_sources({"result": {"candidates": [candidate]}}), ["data:image/png;base64," + self.b64])
+        self.assertEqual(api.media_sources({"data": [{"url": "/final.png"}], "candidates": [candidate]}), ["/final.png"])
+
     def test_all_reference_frames_reach_edit_request(self):
         self.respond({"data": [{"b64_json": self.b64}]})
         with patch.object(nodes, "check_cancel"):
@@ -316,6 +453,11 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(set(nodes.NODE_DISPLAY_NAME_MAPPINGS), expected)
         for node in nodes.NODE_CLASS_MAPPINGS.values():
             self.assertEqual(node.CATEGORY, "ziyuanAI")
+        media_names = {"ZiyuanMediaLoader", "ZiyuanMediaSplitter"}
+        self.assertEqual(set(plugin.NODE_CLASS_MAPPINGS), expected | media_names)
+        self.assertEqual(set(plugin.NODE_DISPLAY_NAME_MAPPINGS), expected | media_names)
+        for name in media_names:
+            self.assertEqual(plugin.NODE_CLASS_MAPPINGS[name].CATEGORY, "ziyuanAI")
         for path in (ROOT / "examples").glob("*.json"):
             with self.subTest(workflow=path.name):
                 workflow = json.loads(path.read_text(encoding="utf-8"))

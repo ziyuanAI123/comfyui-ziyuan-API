@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import math
+import re
 import uuid
 import wave
 from pathlib import Path
@@ -12,7 +13,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps
 
-from .api import IMAGE_MODELS, VIDEO_MODEL, SEEDANCE_MINI_MODEL, QIAOMO_MODELS, ZiyuanClient, validate_size
+from .api import IMAGE_MODELS, BANANA_MODELS, BANANA_RATIOS, VIDEO_MODEL, SEEDANCE_MINI_MODEL, QIAOMO_MODELS, ZiyuanClient, validate_size
 from . import jobs
 
 
@@ -101,8 +102,8 @@ class ZiyuanImageNode:
         return {
             "required": {
                 "提示词": ("STRING", {"multiline": True, "default": ""}),
-                "模型": (list(IMAGE_MODELS),),
-                "比例": (RATIOS, {"default": "自动", "tooltip": "自动沿用第一张参考图比例；无参考图时为 1:1。"}),
+                "模型": (list(IMAGE_MODELS), {"ziyuan_banana_models": list(BANANA_MODELS), "ziyuan_banana_ratios": list(BANANA_RATIOS)}),
+                "比例": (RATIOS, {"default": "自动", "tooltip": "自动沿用第一张参考图比例；T香蕉取最接近的支持比例；无参考图时为 1:1。"}),
                 "分辨率": (["1K", "2K", "4K"], {"default": "2K"}),
                 "质量": (["自动", "高", "中等", "低"], {"default": "自动"}),
                 "输出格式": (["自动", "png", "jpeg", "webp"], {"default": "自动"}),
@@ -113,7 +114,17 @@ class ZiyuanImageNode:
         }
 
     def run(self, 提示词, 模型, 比例, 分辨率, 质量, 输出格式, 生成数量, 种子, 最大等待秒数, API密钥, API地址, 绕过代理, **kwargs):
-        size = image_size(selected_ratio(比例, kwargs, "1:1"), 分辨率)
+        ratio = selected_ratio(比例, kwargs, "1:1")
+        if 模型 in BANANA_MODELS:
+            if 分辨率 not in ("1K", "2K", "4K"):
+                raise ValueError("T香蕉分辨率须为 1K、2K 或 4K。")
+            if 比例 == "自动":
+                size = min(BANANA_RATIOS, key=lambda label: abs(math.log(ratio / selected_ratio(label, {}, "1:1"))))
+            else:
+                size = 比例
+            return self.generate(提示词, API密钥, API地址, 最大等待秒数, 种子, 模型, size, 生成数量,
+                                 _quality=分辨率, _bypass_proxy=绕过代理, **kwargs)
+        size = image_size(ratio, 分辨率)
         quality = {"自动": None, "高": "high", "中等": "medium", "低": "low"}[质量]
         return self.generate(提示词, API密钥, API地址, 最大等待秒数, 种子, 模型, size, 生成数量,
                              _quality=quality, _output_format=None if 输出格式 == "自动" else 输出格式,
@@ -124,10 +135,21 @@ class ZiyuanImageNode:
             raise ValueError("请选择支持的图片模型。")
         if type(n) is not int or not 1 <= n <= 10:
             raise ValueError("图片生成数量须为 1–10 的整数。")
+        banana = model in BANANA_MODELS
+        if banana:
+            if n != 1:
+                raise ValueError("T香蕉每个任务只能生成 1 张图片。")
+            if size not in BANANA_RATIOS:
+                raise ValueError("T香蕉不支持此比例，请选择节点提供的比例。")
+            if kwargs.get("_quality", "1K") not in ("1K", "2K", "4K"):
+                raise ValueError("T香蕉分辨率须为 1K、2K 或 4K。")
+            if kwargs.get("_output_format"):
+                raise ValueError("T香蕉输出格式由模型决定。")
         refs = collect_references(kwargs)
+        prompt = resolve_prompt_references(prompt, kwargs, len(refs))
         if not prompt.strip() and not refs:
             raise ValueError("请输入提示词或连接参考图。")
-        payload = {"model": model, "prompt": prompt, "size": validate_size(size), "n": n, "response_format": "url"}
+        payload = {"model": model, "prompt": prompt, "size": size if banana else validate_size(size), "n": n, "response_format": "url"}
         if kwargs.get("_quality"):
             payload["quality"] = kwargs["_quality"]
         if kwargs.get("_output_format"):
@@ -211,6 +233,7 @@ class ZiyuanVideoNode:
             client.close()
 
     def build_payload(self, prompt, model, size, seconds, refs, **kwargs):
+        prompt = resolve_prompt_references(prompt, kwargs, len(refs))
         payload = {"model": model, "prompt": prompt, "size": validate_size(size), "seconds": seconds}
         if refs:
             payload["images"] = refs
@@ -269,6 +292,41 @@ def collect_videos(inputs, limit=3):
             raise ValueError(f"参考视频{i} 转换后的 MP4 须大于 0 且不超过 50 MiB。")
         files.append(raw)
     return files
+
+
+def resolve_prompt_references(prompt, inputs, image_count, video_count=0, audio_count=0):
+    if "@已断开(" in prompt:
+        raise ValueError("提示词中有已断开的素材引用，请删除该标记并输入 @ 重新选择。")
+    mappings = {}
+    for kind, prefix, total in (("图", "参考图", image_count), ("视频", "参考视频", video_count),
+                                 ("音频", "参考音频", audio_count)):
+        mapping, offset = {}, 0
+        for index in range(1, 31):
+            if not total:
+                break
+            value = inputs.get(f"{prefix}{index}", inputs.get(f"图片{index}") if kind == "图" else None)
+            if value is None:
+                continue
+            count = value.shape[0] if kind == "图" else value["waveform"].shape[0] if kind == "音频" else 1
+            if offset + count <= total:
+                mapping[index] = (offset + 1, offset + count)
+            offset += count
+        # Legacy URL inputs have one asset per line, without local sockets.
+        mappings[kind] = mapping if mapping else {i: (i, i) for i in range(1, total + 1)}
+
+    def replace(match):
+        kind, index = match.group(1), int(match.group(2))
+        key = "图" if kind == "图片" else kind
+        span = mappings[key].get(index)
+        if span is None or span[1] < span[0]:
+            raise ValueError(f"提示词引用了 @{kind}{index}，但没有对应的有效素材，请输入 @ 重新选择。")
+        first, last = span
+        number = str(first) if first == last else f"{first}至{last}"
+        unit = "张参考图片" if key == "图" else "段参考" + key
+        # The API has no mention-ID field. Use explicit per-type upload ordinals in the model's text.
+        return f"（第{number}{unit}）"
+
+    return re.sub(r"@(图片|图|视频|音频)(\d+)", replace, prompt)
 
 
 class ZiyuanQiaomoNode(ZiyuanVideoNode):
@@ -340,6 +398,7 @@ class ZiyuanQiaomoNode(ZiyuanVideoNode):
             raise ValueError(f"{model} 最多{self.REFERENCE_LIMIT}张参考图、{self.VIDEO_LIMIT}段参考视频、{self.AUDIO_LIMIT}段参考音频。")
         if image_count + video_count + audio_count > 12:
             raise ValueError("图片、视频、音频合计最多12个参考素材（包括 IMAGE/AUDIO 批次）。")
+        prompt = resolve_prompt_references(prompt, kwargs, image_count, video_count, audio_count)
         mode = kwargs.get("Mini素材模式", "组合参考")
         if mode not in ("组合参考", "首尾帧"):
             raise ValueError("请选择有效的素材模式。")

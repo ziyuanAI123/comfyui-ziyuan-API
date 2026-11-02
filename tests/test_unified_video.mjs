@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 const source = readFileSync(new URL("../web/unified_video.js", import.meta.url), "utf8")
     .replace('import { app } from "../../scripts/app.js";', "const app = { registerExtension(extension) { this.extension = extension; } };");
-const { app } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport { app };").toString("base64"));
+const { app, referenceItems, mentionQuery } = await import("data:text/javascript;base64," + Buffer.from(source + "\nexport { app, referenceItems, mentionQuery };").toString("base64"));
 const profiles = {
     omni: { ratios: ["自动", "16:9", "9:16", "1:1", "4:3"], resolutions: ["720p", "1080p"], duration: { min: 1, max: 60, default: 5 }, images: 14, audio_limit: 0, videos: 0, sound: false },
     full: { ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], resolutions: ["720p", "480p", "1080p", "4k"], duration: { min: 4, max: 15, default: 4 }, images: 9, audio_limit: 3, videos: 3, sound: true, qiaomo: true },
@@ -26,6 +26,9 @@ function createNode(nodeName) {
             this.graph = { links: {}, getLink(id) { return this.links[id]; } };
             this.widgets = [["模型", "omni"], ["比例", "4:3"], ["分辨率", "720p"], ["时长秒数", 30], ["生成声音", false]]
                 .map(([name, value]) => ({ name, value, type: name === "生成声音" ? "toggle" : "combo", options: {} }));
+            this.widgets.push({ name: "提示词", value: "", type: "text" });
+            if (imageNode) this.widgets.push(...[["质量", "高"], ["输出格式", "webp"], ["生成数量", 5]]
+                .map(([name, value]) => ({ name, value, type: name === "生成数量" ? "number" : "combo", options: {} })));
             if (!imageNode) this.widgets.push(...["Mini素材模式", "Mini图片链接", "Mini视频链接", "Mini音频链接"]
                 .map((name) => ({ name, value: name === "Mini素材模式" ? "组合参考" : "", type: "text",
                                  options: {}, inputEl: { style: {} } })));
@@ -43,7 +46,9 @@ function createNode(nodeName) {
         setDirtyCanvas() {}
     }
     app.extension.beforeRegisterNodeDef(Node, { name: nodeName, input: {
-        required: { 模型: [Object.keys(profiles), { ziyuan_profiles: profiles }] }, optional,
+        required: { 模型: [Object.keys(profiles), { ziyuan_profiles: profiles,
+            ziyuan_banana_models: ["T香蕉2", "T香蕉2.1", "T香蕉pro"],
+            ziyuan_banana_ratios: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"] }] }, optional,
     } });
     const node = new Node();
     node.onNodeCreated();
@@ -51,6 +56,31 @@ function createNode(nodeName) {
 }
 const widget = (node, name) => node.widgets.find((w) => w.name === name);
 const names = (node) => node.inputs.map((input) => input.name);
+for (const type of ["ZiyuanImageNode", "ZiyuanImageSubmitNode"]) {
+    test(`${type}: banana controls match contract and switching back restores GPT controls`, async () => {
+        const node = createNode(type);
+        await connect(node, "参考图1", 1);
+        widget(node, "提示词").value = "使用@图1";
+        for (const model of ["T香蕉2", "T香蕉2.1", "T香蕉pro"]) {
+            widget(node, "比例").value = "21:9";
+            await select(node, model);
+            assert.equal(widget(node, "比例").value, "自动");
+            assert.equal(widget(node, "比例").options.values.includes("21:9"), false);
+            assert.equal(widget(node, "质量").hidden, true);
+            assert.equal(widget(node, "输出格式").hidden, true);
+            assert.equal(widget(node, "生成数量").value, 1);
+            assert.equal(widget(node, "生成数量").options.max, 1);
+            assert.equal(node.inputs[0].link, 1);
+            assert.equal(widget(node, "提示词").value, "使用@图1");
+        }
+        await select(node, "omni");
+        assert.equal(widget(node, "质量").hidden, false);
+        assert.equal(widget(node, "质量").value, "高");
+        assert.equal(widget(node, "输出格式").type, "combo");
+        assert.equal(widget(node, "生成数量").options.max, 10);
+        assert.equal(widget(node, "比例").options.values.includes("21:9"), true);
+    });
+}
 async function select(node, model) {
     widget(node, "模型").value = model;
     widget(node, "模型").callback(model);
@@ -81,6 +111,57 @@ function checkLinks(node) {
         assert.equal(node.graph.links[input.link].origin_id, input.link + 100);
     });
 }
+
+test("mention candidates only contain wired media and identify their source", async () => {
+    const node = createNode("ZiyuanUnifiedVideoNode");
+    await select(node, "mini");
+    await connect(node, "参考图1", 1);
+    await connect(node, "参考视频1", 2);
+    await connect(node, "参考音频1", 3);
+    node.graph.getNodeById = (id) => ({ title: `素材${id}`, widgets: [{ name: "image", value: "角色.png" }] });
+    assert.deepEqual(referenceItems(node).map((item) => item.token), ["@图1", "@音频1", "@视频1"]);
+    assert.match(referenceItems(node)[0].label, /素材101.*角色.png/);
+    await select(node, "omni");
+    assert.equal(referenceItems(node).filter((item) => !item.disabled).length, 1);
+});
+
+for (const type of ["ZiyuanImageNode", "ZiyuanImageSubmitNode", "ZiyuanUnifiedVideoNode", "ZiyuanUnifiedVideoSubmitNode"]) {
+    test(`${type}: mentions follow retained connections and flag deleted assets`, async () => {
+        const node = createNode(type);
+        await Promise.resolve();
+        for (let i = 1; i <= 3; i++) await connect(node, `参考图${i}`, i);
+        widget(node, "提示词").value = "让@图3 拿着@图片2 ，@图1 在旁边";
+        await disconnect(node, "参考图2");
+        assert.equal(widget(node, "提示词").value, "让@图2 拿着@已断开(图片2) ，@图1 在旁边");
+        await connect(node, "参考图3", 4);
+        assert.match(widget(node, "提示词").value, /@已断开\(图片2\)/);
+        await disconnect(node, "参考图1");
+        assert.equal(widget(node, "提示词").value, "让@图1 拿着@已断开(图片2) ，@已断开(图1) 在旁边");
+        const restored = createNode(type);
+        restored.inputs = structuredClone(node.inputs);
+        restored.graph.links = structuredClone(node.graph.links);
+        widget(restored, "提示词").value = widget(node, "提示词").value;
+        restored.onConfigure();
+        await Promise.resolve();
+        assert.equal(widget(restored, "提示词").value, widget(node, "提示词").value);
+    });
+}
+
+test("sparse old workflow references are remapped on first configuration", async () => {
+    const node = createNode("ZiyuanImageNode");
+    node.inputs[4].link = 5;
+    node.graph.links[5] = { id: 5, origin_id: 105, target_slot: 4 };
+    widget(node, "提示词").value = "保留@图片5 的角色";
+    node.onConfigure();
+    await Promise.resolve();
+    assert.equal(widget(node, "提示词").value, "保留@图1 的角色");
+});
+
+test("mention query uses the cursor and leaves other prompt text alone", () => {
+    assert.deepEqual(mentionQuery("前文 @视频 后文", 6), { start: 3, query: "视频" });
+    assert.equal(mentionQuery("@图1 已选择", 8), null);
+    assert.deepEqual(mentionQuery("人物@", 3), { start: 2, query: "" });
+});
 
 for (const type of ["ZiyuanUnifiedVideoNode", "ZiyuanUnifiedVideoSubmitNode"]) {
     test(`${type}: all model controls, native inputs and frame mode`, async () => {
