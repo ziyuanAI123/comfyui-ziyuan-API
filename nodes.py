@@ -502,10 +502,12 @@ def submit_job(kind, node, inputs):
     # Freeze reference inputs while the workflow continues on other branches.
     inputs = {key: value.detach().cpu().clone() if isinstance(value, torch.Tensor) else value
               for key, value in inputs.items()}
+    api_key = jobs.resolve_api_key(inputs.get("API密钥", ""))
+    inputs["API密钥"] = api_key
     for key, value in inputs.items():
         if isinstance(value, dict) and isinstance(value.get("waveform"), torch.Tensor):
             inputs[key] = {**value, "waveform": value["waveform"].detach().cpu().clone()}
-    return (jobs.submit(kind, lambda cancel: node.run(**inputs, _cancel_check=cancel)),)
+    return (jobs.submit(kind, lambda cancel: node.run(**inputs, _cancel_check=cancel), api_key),)
 
 
 class ZiyuanImageSubmitNode(ZiyuanImageNode):
@@ -535,18 +537,25 @@ class ZiyuanImageFetchNode:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"任务编号": ("STRING", {"forceInput": True})}}
+        return {"required": {
+            "API密钥": ("STRING", {"default": "",
+                                 "tooltip": "使用提交时的 API 密钥，获取本次 ComfyUI 运行中最近提交的同类型任务；留空使用 ZIYUAN_API_KEY。"}),
+        }}
 
-    def fetch(self, 任务编号):
-        return jobs.fetch(任务编号, "image", check_cancel)
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    def fetch(self, API密钥):
+        return jobs.fetch_latest("image", check_cancel, API密钥)
 
 
 class ZiyuanUnifiedVideoFetchNode(ZiyuanImageFetchNode):
     RETURN_TYPES = ZiyuanVideoNode.RETURN_TYPES
     RETURN_NAMES = ZiyuanVideoNode.RETURN_NAMES
 
-    def fetch(self, 任务编号):
-        return jobs.fetch(任务编号, "video", check_cancel)
+    def fetch(self, API密钥):
+        return jobs.fetch_latest("video", check_cancel, API密钥)
 
 
 NODE_CLASS_MAPPINGS = {

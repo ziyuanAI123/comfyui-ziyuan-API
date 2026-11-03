@@ -356,12 +356,49 @@ class ZiyuanMediaSplitter:
         )
 
 
+class ZiyuanVideoToReferenceFrames:
+    CATEGORY = CATEGORY
+    FUNCTION = "convert"
+    RETURN_TYPES = ("IMAGE",) * MAX_VIDEOS + ("AUDIO",) * MAX_VIDEOS
+    RETURN_NAMES = tuple(f"{prefix}_{index}" for prefix in ("video_frames", "video_audio")
+                         for index in range(1, MAX_VIDEOS + 1))
+    DESCRIPTION = "最多提取 3 个原生 VIDEO 的画面和原声，分别连接 H3 同编号的视频参考和视频音轨输入；无原声时音轨为空。"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"video": ("VIDEO",)},
+            "optional": {f"video_{index}": ("VIDEO",) for index in range(2, MAX_VIDEOS + 1)},
+        }
+
+    @staticmethod
+    def _frames_and_audio(video):
+        get_components = getattr(video, "get_components", None)
+        if not callable(get_components):
+            raise ValueError("输入不是原生 VIDEO 对象。")
+        try:
+            components = get_components()
+        except Exception as exc:
+            raise ValueError(f"无法读取视频帧: {exc}") from exc
+        frames = components.images
+        if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or frames.shape[0] < 1:
+            raise ValueError("视频没有可用帧。")
+        return frames, components.audio
+
+    def convert(self, video, video_2=None, video_3=None):
+        components = [self._frames_and_audio(value) if value is not None else (None, None)
+                      for value in (video, video_2, video_3)]
+        return tuple(frames for frames, audio in components) + tuple(audio for frames, audio in components)
+
+
 NODE_CLASS_MAPPINGS = {
     "ZiyuanMediaLoader": ZiyuanMediaLoader,
     "ZiyuanMediaSplitter": ZiyuanMediaSplitter,
+    "ZiyuanVideoToReferenceFrames": ZiyuanVideoToReferenceFrames,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ZiyuanMediaLoader": "ziyuanAI统一素材加载",
     "ZiyuanMediaSplitter": "ziyuanAI素材拆分",
+    "ZiyuanVideoToReferenceFrames": "ziyuanAI视频转参考帧",
 }

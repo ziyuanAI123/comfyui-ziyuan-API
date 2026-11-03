@@ -12,6 +12,117 @@ const profiles = {
     newer: { ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], resolutions: ["720p", "480p", "1080p"], duration: { min: 4, max: 30, default: 4 }, images: 12, audio_limit: 10, videos: 12, sound: true, qiaomo: true },
 };
 
+for (const name of ["ZiyuanImageFetchNode", "ZiyuanUnifiedVideoFetchNode"]) {
+    for (const keyAsInput of [false, true]) {
+        test(`${name}: remove saved task socket and preserve API key ${keyAsInput ? "connection" : "widget"}`, async () => {
+            class Node {
+                constructor() {
+                    this.inputs = [];
+                    this.widgets = [{ name: "API密钥", value: "saved-test-key" }];
+                    this.size = [390, 210];
+                    this.graph = { links: {} };
+                }
+                onNodeCreated() { this.created = true; return "created"; }
+                onConfigure() { this.configured = true; return "configured"; }
+                removeInput(index) {
+                    delete this.graph.links[this.inputs[index].link];
+                    this.inputs.splice(index, 1);
+                    this.inputs.forEach((input, slot) => {
+                        if (input.link != null) this.graph.links[input.link].target_slot = slot;
+                    });
+                }
+                computeSize() { return [390, 100 + this.inputs.length * 20]; }
+                setSize(size) { this.size = size; }
+                setDirtyCanvas() { this.dirty = true; }
+            }
+            app.extension.beforeRegisterNodeDef(Node, { name });
+            const node = new Node();
+            assert.equal(node.onNodeCreated(), "created");
+            await Promise.resolve();
+            node.inputs = [{ name: "任务编号", type: "STRING", link: 1 }];
+            node.graph.links[1] = { id: 1, target_slot: 0 };
+            if (keyAsInput) {
+                node.inputs.push({ name: "API密钥", type: "STRING", link: 2 });
+                node.graph.links[2] = { id: 2, target_slot: 1 };
+            }
+            const keyWidget = node.widgets[0];
+            assert.equal(node.onConfigure(), "configured");
+            await Promise.resolve();
+            assert.equal(node.inputs.some(input => input.name === "任务编号"), false);
+            assert.equal(node.graph.links[1], undefined);
+            assert.equal(node.widgets[0], keyWidget);
+            assert.equal(keyWidget.value, "saved-test-key");
+            assert.equal(node.size[0], 390);
+            assert.equal(node.dirty, true);
+            if (keyAsInput) {
+                assert.equal(node.inputs[0].name, "API密钥");
+                assert.equal(node.inputs[0].link, 2);
+                assert.equal(node.graph.links[2].target_slot, 0);
+            }
+            node.onConfigure();
+            await Promise.resolve();
+            assert.equal(node.inputs.length, keyAsInput ? 1 : 0);
+        });
+    }
+}
+
+for (const oldLayout of ["frames-only", "frames-audio-fps"]) {
+test(`video converter: restore audio from ${oldLayout} and preserve existing connections`, async () => {
+    class Node {
+        constructor() {
+            this.inputs = [{ name: "video", link: 100 }];
+            this.outputs = [1, 2, 3].flatMap(index => [
+                { name: `video_frames_${index}`, type: "IMAGE", links: [index * 3] },
+                { name: `video_audio_${index}`, type: "AUDIO", links: [index * 3 + 1] },
+                { name: `fps_${index}`, type: "FLOAT", links: [index * 3 + 2] },
+            ]);
+            if (oldLayout === "frames-only") {
+                this.outputs = this.outputs.filter(output => output.type === "IMAGE");
+            }
+            this.graph = { links: Object.fromEntries(this.outputs.map((output, slot) =>
+                [output.links[0], { origin_slot: slot }])) };
+            this.size = [340, 400];
+        }
+        removeOutput(slot) {
+            for (const id of this.outputs[slot].links) delete this.graph.links[id];
+            this.outputs.splice(slot, 1);
+            this.outputs.forEach((output, index) => {
+                for (const id of output.links) this.graph.links[id].origin_slot = index;
+            });
+        }
+        addOutput(name, type) { this.outputs.push({ name, type, links: null }); }
+        computeSize() { return [340, 60 + this.outputs.length * 20]; }
+        setSize(size) { this.size = size; }
+        setDirtyCanvas() { this.dirty = true; }
+    }
+    app.extension.beforeRegisterNodeDef(Node, { name: "ZiyuanVideoToReferenceFrames" });
+    const node = new Node();
+    node.onNodeCreated?.();
+    node.onConfigure?.();
+    await Promise.resolve();
+    assert.deepEqual(node.outputs.map(output => output.name),
+        ["video_frames_1", "video_frames_2", "video_frames_3",
+         "video_audio_1", "video_audio_2", "video_audio_3"]);
+    assert.deepEqual(node.outputs.map(output => output.type),
+        ["IMAGE", "IMAGE", "IMAGE", "AUDIO", "AUDIO", "AUDIO"]);
+    assert.deepEqual(node.outputs.map(output => output.links),
+        [[3], [6], [9], ...(oldLayout === "frames-only" ? [null, null, null] : [[4], [7], [10]])]);
+    assert.deepEqual(Object.keys(node.graph.links),
+        oldLayout === "frames-only" ? ["3", "6", "9"] : ["3", "4", "6", "7", "9", "10"]);
+    for (let slot = 0; slot < 3; slot++) {
+        assert.equal(node.graph.links[(slot + 1) * 3].origin_slot, slot);
+        if (oldLayout !== "frames-only") {
+            assert.equal(node.graph.links[(slot + 1) * 3 + 1].origin_slot, slot + 3);
+        }
+    }
+    assert.equal(node.inputs[0].link, 100);
+    assert.deepEqual(node.size, [340, 180]);
+    node.onConfigure();
+    await Promise.resolve();
+    assert.equal(node.outputs.length, 6);
+});
+}
+
 function createNode(nodeName) {
     const imageNode = nodeName.startsWith("ZiyuanImage");
     const optional = Object.fromEntries(Array.from({ length: imageNode ? 14 : 30 }, (_, i) => [`参考图${i + 1}`, ["IMAGE"]]));

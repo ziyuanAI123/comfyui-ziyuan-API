@@ -32,6 +32,7 @@ from media_loader import (  # noqa: E402
     split_bundle,
     ZiyuanMediaLoader,
     ZiyuanMediaSplitter,
+    ZiyuanVideoToReferenceFrames,
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
 )
@@ -195,10 +196,64 @@ class TestSplitBundle(unittest.TestCase):
         self.assertEqual(NODE_DISPLAY_NAME_MAPPINGS, {
             "ZiyuanMediaLoader": "ziyuanAI统一素材加载",
             "ZiyuanMediaSplitter": "ziyuanAI素材拆分",
+            "ZiyuanVideoToReferenceFrames": "ziyuanAI视频转参考帧",
         })
         self.assertEqual(set(NODE_CLASS_MAPPINGS), set(NODE_DISPLAY_NAME_MAPPINGS))
         for node in NODE_CLASS_MAPPINGS.values():
             self.assertEqual(node.CATEGORY, "ziyuanAI")
+
+
+class TestVideoToReferenceFrames(unittest.TestCase):
+    def test_frames_are_exposed_for_reference_nodes(self):
+        frames = [torch.zeros((index + 2, 8, 12, 3)) for index in range(3)]
+        audios = [{"waveform": torch.full((1, 1, 32), float(index)), "sample_rate": 16000}
+                  for index in range(3)]
+        videos = [
+            SimpleNamespace(get_components=lambda index=index: SimpleNamespace(
+                images=frames[index], audio=audios[index],
+            ))
+            for index in range(3)
+        ]
+        result = ZiyuanVideoToReferenceFrames().convert(*videos)
+        self.assertEqual(len(result), 6)
+        for index in range(3):
+            self.assertIs(result[index], frames[index])
+            self.assertIs(result[index + 3], audios[index])
+
+    def test_unconnected_optional_videos_return_empty_outputs(self):
+        frames = torch.zeros((5, 8, 12, 3))
+        video = SimpleNamespace(get_components=lambda: SimpleNamespace(
+            images=frames, audio=None, frame_rate=24,
+        ))
+        result = ZiyuanVideoToReferenceFrames().convert(video)
+        self.assertIs(result[0], frames)
+        self.assertEqual(result[1:], (None,) * 5)
+
+    def test_silent_middle_video_preserves_audio_numbering(self):
+        frames = torch.zeros((2, 8, 12, 3))
+        audios = [{"waveform": torch.zeros((1, 1, 32)), "sample_rate": 16000}, None,
+                  {"waveform": torch.ones((1, 2, 64)), "sample_rate": 24000}]
+        videos = [SimpleNamespace(get_components=lambda audio=audio: SimpleNamespace(
+            images=frames, audio=audio,
+        )) for audio in audios]
+        result = ZiyuanVideoToReferenceFrames().convert(*videos)
+        for index, audio in enumerate(audios):
+            self.assertIs(result[index + 3], audio)
+
+    def test_non_video_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "原生 VIDEO"):
+            ZiyuanVideoToReferenceFrames().convert(torch.zeros((1, 8, 8, 3)))
+
+    def test_schema_has_three_video_slots(self):
+        inputs = ZiyuanVideoToReferenceFrames.INPUT_TYPES()
+        self.assertEqual(set(inputs["required"]), {"video"})
+        self.assertEqual(set(inputs["optional"]), {"video_2", "video_3"})
+        self.assertEqual(ZiyuanVideoToReferenceFrames.RETURN_TYPES, ("IMAGE",) * 3 + ("AUDIO",) * 3)
+        self.assertEqual(
+            ZiyuanVideoToReferenceFrames.RETURN_NAMES,
+            ("video_frames_1", "video_frames_2", "video_frames_3",
+             "video_audio_1", "video_audio_2", "video_audio_3"),
+        )
 
 
 class TestNativeFiles(unittest.TestCase):
@@ -240,6 +295,9 @@ class TestNativeFiles(unittest.TestCase):
                 self.assertEqual(outputs[9].get_dimensions(), (64, 48))
                 self.assertEqual(outputs[12]["sample_rate"], 8000)
                 self.assertEqual(tuple(outputs[12]["waveform"].shape), (1, 1, 16000))
+                converted = ZiyuanVideoToReferenceFrames().convert(outputs[9])
+                self.assertEqual(tuple(converted[0].shape), (3, 48, 64, 3))
+                self.assertEqual(converted[1:], (None,) * 5)
                 self.assertTrue(nodes.collect_videos({"参考视频1": outputs[9]})[0])
                 self.assertTrue(nodes.collect_audio({"参考音频1": outputs[12]}, 3, 15)[0])
                 self.assertEqual(ZiyuanMediaLoader.IS_CHANGED(state), signature)

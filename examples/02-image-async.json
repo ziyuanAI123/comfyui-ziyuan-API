@@ -27,9 +27,7 @@
         {
           "name": "任务编号",
           "type": "STRING",
-          "links": [
-            1
-          ],
+          "links": null,
           "slot_index": 0
         }
       ],
@@ -65,14 +63,8 @@
       ],
       "flags": {},
       "order": 1,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "任务编号",
-          "type": "STRING",
-          "link": 1
-        }
-      ],
+      "mode": 2,
+      "inputs": [],
       "outputs": [
         {
           "name": "图像",
@@ -90,19 +82,10 @@
       "properties": {
         "Node name for S&R": "ZiyuanImageFetchNode"
       },
-      "widgets_values": []
+      "widgets_values": [""]
     }
   ],
-  "links": [
-    [
-      1,
-      1,
-      0,
-      2,
-      0,
-      "STRING"
-    ]
-  ],
+  "links": [],
   "groups": [],
   "config": {},
   "extra": {

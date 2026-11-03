@@ -112,8 +112,8 @@ class PluginTests(unittest.TestCase):
                     "参考图1": torch.zeros((2, 6, 8, 3)), "参考图2": torch.ones((1, 6, 8, 3))}
                 with patch.object(nodes, "check_cancel"):
                     if asynchronous:
-                        task, = nodes.ZiyuanImageSubmitNode().submit(**options)
-                        nodes.ZiyuanImageFetchNode().fetch(task)
+                        nodes.ZiyuanImageSubmitNode().submit(**options)
+                        nodes.ZiyuanImageFetchNode().fetch("test-key")
                     else:
                         nodes.ZiyuanImageNode().run(**options)
                 body = self.server.calls[-1][2]
@@ -149,14 +149,14 @@ class PluginTests(unittest.TestCase):
             with patch.object(nodes, "check_cancel"):
                 with self.assertRaises(ValueError):
                     nodes.ZiyuanImageNode().run(**options)
-                task, = nodes.ZiyuanImageSubmitNode().submit(**options)
+                nodes.ZiyuanImageSubmitNode().submit(**options)
                 with self.assertRaises((RuntimeError, ValueError)):
-                    nodes.ZiyuanImageFetchNode().fetch(task)
+                    nodes.ZiyuanImageFetchNode().fetch("test-key")
                 with self.assertRaises(ValueError):
                     nodes.ZiyuanUnifiedVideoNode().run(**(self.video_options() | {"提示词": prompt}))
-                task, = nodes.ZiyuanUnifiedVideoSubmitNode().submit(**(self.video_options() | {"提示词": prompt}))
+                nodes.ZiyuanUnifiedVideoSubmitNode().submit(**(self.video_options() | {"提示词": prompt}))
                 with self.assertRaises((RuntimeError, ValueError)):
-                    nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
+                    nodes.ZiyuanUnifiedVideoFetchNode().fetch("test-key")
         self.assertEqual(self.server.calls, [])
 
     def test_each_image_model_parses_real_png(self):
@@ -185,8 +185,8 @@ class PluginTests(unittest.TestCase):
                         options["参考图1"] = torch.zeros((1, 6, 8, 3))
                     with patch.object(nodes, "check_cancel"):
                         if asynchronous:
-                            task, = nodes.ZiyuanImageSubmitNode().submit(**options)
-                            tensor, status = nodes.ZiyuanImageFetchNode().fetch(task)
+                            nodes.ZiyuanImageSubmitNode().submit(**options)
+                            tensor, status = nodes.ZiyuanImageFetchNode().fetch("test-key")
                         else:
                             tensor, status = nodes.ZiyuanImageNode().run(**options)
                     _, path, body, _ = self.server.calls[-1]
@@ -255,8 +255,8 @@ class PluginTests(unittest.TestCase):
             self.respond({"data": [result], "result": [result], "output": [result], "images": [result]})
             with patch.object(nodes, "check_cancel"):
                 if asynchronous:
-                    task, = nodes.ZiyuanImageSubmitNode().submit(**self.image_options())
-                    tensor, _ = nodes.ZiyuanImageFetchNode().fetch(task)
+                    nodes.ZiyuanImageSubmitNode().submit(**self.image_options())
+                    tensor, _ = nodes.ZiyuanImageFetchNode().fetch("test-key")
                 else:
                     tensor, _ = nodes.ZiyuanImageNode().run(**self.image_options())
             self.assertEqual(tensor.shape[0], 1)
@@ -295,9 +295,9 @@ class PluginTests(unittest.TestCase):
                             "参考图1": torch.zeros((2, 6, 8, 3)), "参考图2": torch.ones((1, 6, 8, 3))}
                         with patch.object(nodes, "check_cancel"), patch.object(api.time, "sleep"):
                             if asynchronous:
-                                task, = nodes.ZiyuanImageSubmitNode().submit(**options)
-                                tensor, status = nodes.ZiyuanImageFetchNode().fetch(task)
-                                nodes.ZiyuanImageFetchNode().fetch(task)
+                                nodes.ZiyuanImageSubmitNode().submit(**options)
+                                tensor, status = nodes.ZiyuanImageFetchNode().fetch("test-key")
+                                nodes.ZiyuanImageFetchNode().fetch("test-key")
                             else:
                                 tensor, status = nodes.ZiyuanImageNode().run(**options)
                         self.assertEqual(tuple(tensor.shape), (1, 6, 8, 3))
@@ -453,11 +453,17 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(set(nodes.NODE_DISPLAY_NAME_MAPPINGS), expected)
         for node in nodes.NODE_CLASS_MAPPINGS.values():
             self.assertEqual(node.CATEGORY, "ziyuanAI")
-        media_names = {"ZiyuanMediaLoader", "ZiyuanMediaSplitter"}
+        media_names = {"ZiyuanMediaLoader", "ZiyuanMediaSplitter", "ZiyuanVideoToReferenceFrames"}
         self.assertEqual(set(plugin.NODE_CLASS_MAPPINGS), expected | media_names)
         self.assertEqual(set(plugin.NODE_DISPLAY_NAME_MAPPINGS), expected | media_names)
         for name in media_names:
             self.assertEqual(plugin.NODE_CLASS_MAPPINGS[name].CATEGORY, "ziyuanAI")
+        for fetch_node in (nodes.ZiyuanImageFetchNode, nodes.ZiyuanUnifiedVideoFetchNode):
+            required = fetch_node.INPUT_TYPES()["required"]
+            self.assertEqual(set(required), {"API密钥"})
+            self.assertEqual(required["API密钥"][1]["default"], "")
+            signature = fetch_node.IS_CHANGED(API密钥="test-key")
+            self.assertNotEqual(signature, signature)
         for path in (ROOT / "examples").glob("*.json"):
             with self.subTest(workflow=path.name):
                 workflow = json.loads(path.read_text(encoding="utf-8"))
@@ -501,42 +507,86 @@ class PluginTests(unittest.TestCase):
             release.wait(5)
             return ("result",)
 
-        task = nodes.jobs.submit("image", blocked_operation)
+        task = nodes.jobs.submit("image", blocked_operation, "test-key")
         try:
             self.assertTrue(started.wait(2))
             self.assertFalse(nodes.jobs._jobs[task].future.done())
         finally:
             release.set()
-        self.assertEqual(nodes.jobs.fetch(task, "image", lambda: None), ("result",))
+        self.assertEqual(nodes.jobs.fetch(task, "image", lambda: None, "test-key"), ("result",))
 
     def test_async_image_submit_fetch_and_repeat_do_not_resubmit(self):
         self.respond({"data": [{"b64_json": self.b64}]})
         task, = nodes.ZiyuanImageSubmitNode().submit(**self.image_options())
         with patch.object(nodes, "check_cancel"):
-            tensor, status = nodes.ZiyuanImageFetchNode().fetch(task)
-            again, _ = nodes.ZiyuanImageFetchNode().fetch(task)
+            tensor, status = nodes.ZiyuanImageFetchNode().fetch("test-key")
+            again, _ = nodes.ZiyuanImageFetchNode().fetch("test-key")
         self.assertEqual(tuple(tensor.shape), (1, 6, 8, 3))
         self.assertIs(again, tensor)
         self.assertEqual(len(self.server.calls), 1)
         with self.assertRaisesRegex(ValueError, "任务类型不匹配"):
-            nodes.jobs.fetch(task, "video", lambda: None)
+            nodes.jobs.fetch(task, "video", lambda: None, "test-key")
+        with self.assertRaisesRegex(ValueError, "API密钥.*不一致"):
+            nodes.jobs.fetch(task, "image", lambda: None, "wrong-key")
+
+    def test_key_fetch_selects_latest_task_of_same_key_and_kind(self):
+        key = "test-key-select-latest"
+        nodes.jobs.submit("image", lambda cancel: ("old-image",), key)
+        nodes.jobs.submit("image", lambda cancel: ("new-image",), key)
+        nodes.jobs.submit("video", lambda cancel: ("video",), key)
+        nodes.jobs.submit("image", lambda cancel: ("other-key",), "other-select-key")
+        with patch.object(nodes, "check_cancel"):
+            self.assertEqual(nodes.ZiyuanImageFetchNode().fetch(key), ("new-image",))
+            self.assertEqual(nodes.ZiyuanUnifiedVideoFetchNode().fetch(key), ("video",))
+
+    def test_key_fetch_waits_for_latest_task_instead_of_returning_older_result(self):
+        key = "test-key-pending-latest"
+        nodes.jobs.submit("image", lambda cancel: ("old-result",), key)
+        release = threading.Event()
+        def pending(cancel):
+            release.wait(5)
+            return ("latest-result",)
+        nodes.jobs.submit("image", pending, key)
+        def on_wait():
+            release.set()
+        try:
+            with patch.object(nodes, "check_cancel", side_effect=on_wait) as check:
+                self.assertEqual(nodes.ZiyuanImageFetchNode().fetch(key), ("latest-result",))
+                check.assert_called()
+        finally:
+            release.set()
+
+    def test_key_fetch_does_not_fall_back_to_other_keys_or_types(self):
+        key = "test-key-video-only"
+        nodes.jobs.submit("video", lambda cancel: ("video",), key)
+        with patch.object(nodes, "check_cancel"):
+            with self.assertRaisesRegex(ValueError, "找不到.*图片任务"):
+                nodes.ZiyuanImageFetchNode().fetch(key)
+            with self.assertRaisesRegex(ValueError, "找不到.*视频任务"):
+                nodes.ZiyuanUnifiedVideoFetchNode().fetch("unknown-fetch-key")
+
+    def test_key_fetch_uses_environment_key(self):
+        key = "test-key-env-fetch"
+        nodes.jobs.submit("image", lambda cancel: ("environment-result",), key)
+        with patch.dict(os.environ, {"ZIYUAN_API_KEY": key}), patch.object(nodes, "check_cancel"):
+            self.assertEqual(nodes.ZiyuanImageFetchNode().fetch(""), ("environment-result",))
 
     def test_async_timeout_is_propagated_and_fetch_cancel_signals_worker(self):
         def failed(cancel):
             raise TimeoutError("worker timed out")
-        task = nodes.jobs.submit("image", failed)
+        task = nodes.jobs.submit("image", failed, "test-key")
         with self.assertRaisesRegex(TimeoutError, "worker timed out"):
-            nodes.jobs.fetch(task, "image", lambda: None)
+            nodes.jobs.fetch(task, "image", lambda: None, "test-key")
         release = threading.Event()
         def pending(cancel):
             release.wait(5)
             cancel()
-        task = nodes.jobs.submit("video", pending)
+        task = nodes.jobs.submit("video", pending, "test-key")
         def cancel_fetch():
             raise InterruptedError("cancel")
         try:
             with self.assertRaises(InterruptedError):
-                nodes.jobs.fetch(task, "video", cancel_fetch)
+                nodes.jobs.fetch(task, "video", cancel_fetch, "test-key")
             self.assertTrue(nodes.jobs._jobs[task].cancel.is_set())
         finally:
             release.set()
@@ -580,10 +630,10 @@ class PluginTests(unittest.TestCase):
         self.server.responses.append((200, {"Content-Type": "video/mp4"}, buffer.getvalue()))
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(folder_paths, "get_output_directory", return_value=directory), patch.object(nodes, "check_cancel"):
-                task, = nodes.ZiyuanUnifiedVideoSubmitNode().submit(
+                nodes.ZiyuanUnifiedVideoSubmitNode().submit(
                     提示词="test", 模型=api.VIDEO_MODEL, 比例="9:16", 分辨率="720p", 时长秒数=5, 轮询间隔秒=3,
                     种子=0, 最大等待秒数=30, API密钥="test-key", API地址=self.base, 绕过代理=True)
-                video, path, status = nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
+                video, path, status = nodes.ZiyuanUnifiedVideoFetchNode().fetch("test-key")
             self.assertEqual(video.get_dimensions(), (64, 48))
             self.assertTrue(Path(path).is_file())
             self.assertIn("native-video-async", status)
@@ -599,9 +649,9 @@ class PluginTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     with patch.object(folder_paths, "get_output_directory", return_value=directory), patch.object(nodes, "check_cancel"), patch.object(api.time, "sleep"):
                         if asynchronous:
-                            task, = nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
-                            video, path, status = nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
-                            again, _, _ = nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
+                            nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
+                            video, path, status = nodes.ZiyuanUnifiedVideoFetchNode().fetch("test-key")
+                            again, _, _ = nodes.ZiyuanUnifiedVideoFetchNode().fetch("test-key")
                             self.assertIs(again, video)
                         else:
                             video, path, status = nodes.ZiyuanUnifiedVideoNode().run(**options)
@@ -751,8 +801,8 @@ class PluginTests(unittest.TestCase):
                     self.respond({"id": "duration-test", "status": "completed"})
                     options = self.video_options("doubao-seedance-2.5") | {"时长秒数": seconds}
                     if asynchronous:
-                        task, = nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
-                        nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
+                        nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
+                        nodes.ZiyuanUnifiedVideoFetchNode().fetch("test-key")
                     else:
                         nodes.ZiyuanUnifiedVideoNode().run(**options)
                     self.assertEqual(self.server.calls[-1][1], "/v1/videos")
@@ -763,8 +813,8 @@ class PluginTests(unittest.TestCase):
                     before = len(self.server.calls)
                     with self.assertRaisesRegex(ValueError, "不支持所选时长"):
                         if asynchronous:
-                            task, = nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
-                            nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
+                            nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
+                            nodes.ZiyuanUnifiedVideoFetchNode().fetch("test-key")
                         else:
                             nodes.ZiyuanUnifiedVideoNode().run(**options)
                     self.assertEqual(len(self.server.calls), before)
@@ -843,9 +893,9 @@ for (const input of JSON.parse(fs.readFileSync(0, 'utf8'))) {
         with patch.object(nodes, "check_cancel"):
             with self.assertRaisesRegex(ValueError, "不支持所选比例或分辨率"):
                 nodes.ZiyuanUnifiedVideoNode().run(**options)
-            task, = nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
+            nodes.ZiyuanUnifiedVideoSubmitNode().submit(**options)
             with self.assertRaisesRegex(ValueError, "不支持所选比例或分辨率"):
-                nodes.ZiyuanUnifiedVideoFetchNode().fetch(task)
+                nodes.ZiyuanUnifiedVideoFetchNode().fetch("test-key")
         self.assertEqual(self.server.calls, [])
 
     def test_qiaomo_validation_prevents_submit(self):

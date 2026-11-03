@@ -207,6 +207,69 @@ app.registerExtension({
         });
     },
     beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name === "ZiyuanVideoToReferenceFrames") {
+            const cleanOutputs = (node) => {
+                const names = ["video_frames_1", "video_frames_2", "video_frames_3",
+                    "video_audio_1", "video_audio_2", "video_audio_3"];
+                let changed = false;
+                for (let i = (node.outputs?.length ?? 0) - 1; i >= 0; i--) {
+                    if (!/^fps_\d+$/.test(node.outputs[i].name)) continue;
+                    node.removeOutput(i);
+                    changed = true;
+                }
+                for (const name of names) {
+                    if (node.outputs?.some(output => output.name === name)) continue;
+                    node.addOutput(name, name.startsWith("video_frames_") ? "IMAGE" : "AUDIO");
+                    changed = true;
+                }
+                if (node.outputs.some((output, index) => output.name !== names[index])) {
+                    node.outputs.sort((a, b) => names.indexOf(a.name) - names.indexOf(b.name));
+                    changed = true;
+                }
+                node.outputs.forEach((output, index) => {
+                    for (const id of output.links ?? []) {
+                        const link = node.graph?.getLink ? node.graph.getLink(id) : node.graph?.links?.[id];
+                        if (link) link.origin_slot = index;
+                    }
+                });
+                if (changed) {
+                    node.setSize([node.size[0], node.computeSize()[1]]);
+                    node.setDirtyCanvas(true, true);
+                }
+            };
+            for (const hook of ["onNodeCreated", "onConfigure"]) {
+                const original = nodeType.prototype[hook];
+                nodeType.prototype[hook] = function () {
+                    const result = original?.apply(this, arguments);
+                    queueMicrotask(() => cleanOutputs(this));
+                    return result;
+                };
+            }
+            return;
+        }
+        if (["ZiyuanImageFetchNode", "ZiyuanUnifiedVideoFetchNode"].includes(nodeData.name)) {
+            const cleanTaskInput = (node) => {
+                let removed = false;
+                for (let i = (node.inputs?.length ?? 0) - 1; i >= 0; i--) {
+                    if (node.inputs[i].name !== "任务编号") continue;
+                    node.removeInput(i);
+                    removed = true;
+                }
+                if (removed) {
+                    node.setSize([node.size[0], node.computeSize()[1]]);
+                    node.setDirtyCanvas(true, true);
+                }
+            };
+            for (const hook of ["onNodeCreated", "onConfigure"]) {
+                const original = nodeType.prototype[hook];
+                nodeType.prototype[hook] = function () {
+                    const result = original?.apply(this, arguments);
+                    queueMicrotask(() => cleanTaskInput(this));
+                    return result;
+                };
+            }
+            return;
+        }
         const imageNode = ["ZiyuanImageNode", "ZiyuanImageSubmitNode"].includes(nodeData.name);
         if (!imageNode && !["ZiyuanUnifiedVideoNode", "ZiyuanUnifiedVideoSubmitNode"].includes(nodeData.name)) return;
         const profiles = nodeData.input.required["模型"][1]?.ziyuan_profiles;
