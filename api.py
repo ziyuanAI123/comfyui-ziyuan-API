@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 
 import requests
+from urllib3.util import Timeout
 
 
 BANANA_MODELS = ("T香蕉2", "T香蕉2.1", "T香蕉pro")
@@ -124,9 +125,13 @@ class ZiyuanClient:
         url = self.base_url + endpoint
         request_body = {"data": payload, "files": files} if files else {"json": payload}
         try:
+            remaining = self._remaining()
+            # urllib3 also uses connect_timeout while writing the request body.
+            # Allow large POST uploads the remaining budget, including response wait.
+            timeout = Timeout(total=remaining, connect=remaining if method == "POST" else min(15, remaining))
             with self.session.request(
                 method, url, headers={**self._headers(url), "Accept": "application/json"},
-                **request_body, timeout=(min(15, self._remaining()), self._remaining()),
+                **request_body, timeout=timeout,
                 allow_redirects=False,
             ) as response:
                 self._check_response(response)
@@ -134,7 +139,9 @@ class ZiyuanClient:
                     raise RuntimeError("API 请求发生重定向，请检查 API 地址。")
                 body = response.json()
         except requests.Timeout as exc:
-            raise TimeoutError("接口响应超时；请求没有自动重发，请先查看网站任务记录。") from exc
+            raise TimeoutError("接口连接、上传或响应超时；请求没有自动重发，请先查看网站任务记录。") from exc
+        except requests.ConnectionError as exc:
+            raise RuntimeError("接口连接中断，可能为上传超时或网络异常；请求没有自动重发，请先查看网站任务记录。") from exc
         error = task_field(body, "error")
         if error or (isinstance(body, dict) and body.get("success") is False):
             detail = str(error or body.get("message") or "接口返回失败")
@@ -146,16 +153,16 @@ class ZiyuanClient:
             "/v1/images/edits" if payload.get("image") else "/v1/images/generations"
         )
         files = None
-        if kind == "image" and payload.get("model") == "gpt-image-2-super" and payload.get("image"):
+        if kind == "image" and payload.get("model") in ("gpt-image-2-super", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst") and payload.get("image"):
             references = payload["image"]
             if isinstance(references, str):
                 references = [references]
-            # Qiaomo documents file uploads for /v1/images/edits, not JSON image data URIs.
+            # These edit endpoints require image files; JSON data URIs fail upstream.
             field = "image" if len(references) == 1 else "image[]"
             files = []
             for index, source in enumerate(references, 1):
                 if not source.startswith("data:image/png;base64,"):
-                    raise ValueError("Super 参考图必须由 IMAGE 输入提供。")
+                    raise ValueError("参考图必须由 IMAGE 输入提供。")
                 raw = base64.b64decode(source.split(",", 1)[1], validate=True)
                 files.append((field, (f"reference-{index}.png", raw, "image/png")))
             payload = {key: value for key, value in payload.items() if key != "image"}

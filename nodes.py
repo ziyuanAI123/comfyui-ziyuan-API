@@ -107,7 +107,8 @@ class ZiyuanImageNode:
                 "分辨率": (["1K", "2K", "4K"], {"default": "2K"}),
                 "质量": (["自动", "高", "中等", "低"], {"default": "自动"}),
                 "输出格式": (["自动", "png", "jpeg", "webp"], {"default": "自动"}),
-                "生成数量": ("INT", {"default": 1, "min": 1, "max": 10}),
+                "生成数量": ("INT", {"default": 1, "min": 1, "max": 10,
+                                    "tooltip": "gpt-image-2 按数量逐张提交并合并输出，每张单独计费；T香蕉每任务限1张。"}),
                 **common_inputs(1200),
             },
             "optional": reference_inputs(),
@@ -158,16 +159,34 @@ class ZiyuanImageNode:
             payload["image"] = refs[0] if len(refs) == 1 else refs
         client = ZiyuanClient(api_base_url, api_key, 超时秒数, kwargs.get("_cancel_check", check_cancel), kwargs.get("_bypass_proxy", True))
         try:
-            sources, task_id = client.generate("image", payload)
             tensors = []
-            for source in sources[:n]:
-                with Image.open(io.BytesIO(client.image_bytes(source))) as image:
-                    array = np.array(ImageOps.exif_transpose(image).convert("RGB"), dtype=np.float32) / 255.0
-                tensors.append(torch.from_numpy(array).unsqueeze(0))
+            task_ids = []
+            # This gateway returns only one image for gpt-image-2 even with n > 1.
+            request_count = n if model == "gpt-image-2" else 1
+            per_request = n // request_count
+            returned_count = 0
+            for index in range(request_count):
+                try:
+                    client._remaining()
+                    sources, task_id = client.generate("image", {**payload, "n": per_request})
+                    task_ids.append(task_id or "同步返回")
+                    if len(sources) < per_request:
+                        raise RuntimeError(f"接口仅返回 {len(sources)}/{per_request} 张图片；任务 ID：{task_ids[-1]}；未自动补发。")
+                    returned_count += len(sources)
+                    for source in sources[:per_request]:
+                        with Image.open(io.BytesIO(client.image_bytes(source))) as image:
+                            array = np.array(ImageOps.exif_transpose(image).convert("RGB"), dtype=np.float32) / 255.0
+                        tensors.append(torch.from_numpy(array).unsqueeze(0))
+                except (RuntimeError, TimeoutError) as exc:
+                    if request_count == 1:
+                        raise
+                    raise type(exc)(f"{exc}\n批量生成在第 {index + 1}/{request_count} 张停止；此前已解码 {len(tensors)} 张；"
+                                    f"已完成任务 ID：{', '.join(task_ids) or '无'}；未自动重发。") from exc
             if len({tuple(t.shape[1:]) for t in tensors}) != 1:
                 raise RuntimeError("返回图片尺寸不一致，不能组成 IMAGE 批次；请将生成数量设为 1。")
-            note = f"；接口返回 {len(sources)} 条图片结果，按请求数量输出前 {n} 张" if len(sources) > n else ""
-            return torch.cat(tensors), f"生成完成；模型：{model}；图片：{len(tensors)}；任务 ID：{task_id or '同步返回'}{note}"
+            note = (f"；接口返回 {returned_count} 条图片结果，按请求数量输出前 {n} 张" if request_count == 1
+                    else f"；接口共返回 {returned_count} 条图片结果，每次请求只输出首张") if returned_count > n else ""
+            return torch.cat(tensors), f"生成完成；模型：{model}；图片：{len(tensors)}；任务 ID：{', '.join(task_ids)}{note}"
         finally:
             client.close()
 
@@ -533,13 +552,14 @@ class ZiyuanImageFetchNode:
     FUNCTION = "fetch"
     RETURN_TYPES = ZiyuanImageNode.RETURN_TYPES
     RETURN_NAMES = ZiyuanImageNode.RETURN_NAMES
+    OUTPUT_IS_LIST = (True, True)
     OUTPUT_NODE = True
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
             "API密钥": ("STRING", {"default": "",
-                                 "tooltip": "使用提交时的 API 密钥，获取本次 ComfyUI 运行中最近提交的同类型任务；留空使用 ZIYUAN_API_KEY。"}),
+                                 "tooltip": "使用提交时的 API 密钥，按提交顺序获取尚未取回的同类型任务；重复获取复用上一批结果。请先完成整批提交。留空使用 ZIYUAN_API_KEY。"}),
         }}
 
     @classmethod
@@ -547,15 +567,18 @@ class ZiyuanImageFetchNode:
         return float("nan")
 
     def fetch(self, API密钥):
-        return jobs.fetch_latest("image", check_cancel, API密钥)
+        results = jobs.fetch_batch("image", check_cancel, API密钥)
+        return tuple(list(values) for values in zip(*results))
 
 
 class ZiyuanUnifiedVideoFetchNode(ZiyuanImageFetchNode):
     RETURN_TYPES = ZiyuanVideoNode.RETURN_TYPES
     RETURN_NAMES = ZiyuanVideoNode.RETURN_NAMES
+    OUTPUT_IS_LIST = (True, True, True)
 
     def fetch(self, API密钥):
-        return jobs.fetch_latest("video", check_cancel, API密钥)
+        results = jobs.fetch_batch("video", check_cancel, API密钥)
+        return tuple(list(values) for values in zip(*results))
 
 
 NODE_CLASS_MAPPINGS = {
