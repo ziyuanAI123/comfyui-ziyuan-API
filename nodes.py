@@ -158,17 +158,49 @@ class ZiyuanImageNode:
         if refs:
             payload["image"] = refs[0] if len(refs) == 1 else refs
         client = ZiyuanClient(api_base_url, api_key, 超时秒数, kwargs.get("_cancel_check", check_cancel), kwargs.get("_bypass_proxy", True))
+        request_count = n if model == "gpt-image-2" else 1
+        per_request = n // request_count
+        if kwargs.get("_async"):
+            submitted = 0
+            deadline = client.deadline
+            try:
+                # POST runs on ComfyUI's execution thread, just as in KR.
+                for index in range(request_count):
+                    if index:
+                        client = ZiyuanClient(api_base_url, api_key, 超时秒数, kwargs.get("_cancel_check", check_cancel),
+                                              kwargs.get("_bypass_proxy", True))
+                        client.deadline = deadline
+                    request = {**payload, "n": per_request}
+                    submission = client.submit_generation("image", request)
+                    # Each accepted server task has its own worker/client: one failure
+                    # must not discard other accepted results in this submission.
+                    jobs.submit("image", lambda cancel, c=client, p=request, s=submission: self._finish_images(
+                        c, p, 1, per_request, [s], cancel), api_key)
+                    submitted += 1
+            except Exception as exc:
+                client.close()
+                if not submitted:
+                    raise
+                raise RuntimeError(f"已提交{submitted}/{request_count}项，可用同一密钥获取已提交结果；"
+                                   f"后续提交失败，未自动重发：{exc}") from exc
+            return (f"图片请求已提交：{request_count}项；后台轮询与下载中，请使用同一密钥获取结果。",)
+        return self._finish_images(client, payload, request_count, per_request)
+
+    @staticmethod
+    def _finish_images(client, payload, request_count, per_request, submissions=None, cancel=None):
+        if cancel is not None:
+            client.check_cancel = cancel
+        model, n = payload["model"], request_count * per_request
         try:
             tensors = []
             task_ids = []
-            # This gateway returns only one image for gpt-image-2 even with n > 1.
-            request_count = n if model == "gpt-image-2" else 1
-            per_request = n // request_count
             returned_count = 0
             for index in range(request_count):
                 try:
                     client._remaining()
-                    sources, task_id = client.generate("image", {**payload, "n": per_request})
+                    sources, task_id = (client.finish_generation("image", payload, submissions[index])
+                                        if submissions is not None else
+                                        client.generate("image", {**payload, "n": per_request}))
                     task_ids.append(task_id or "同步返回")
                     if len(sources) < per_request:
                         raise RuntimeError(f"接口仅返回 {len(sources)}/{per_request} 张图片；任务 ID：{task_ids[-1]}；未自动补发。")
@@ -224,7 +256,7 @@ class ZiyuanVideoNode:
 
     def generate(self, prompt, api_key, api_base_url, 超时秒数, 重新生成编号, model, size, seconds, **kwargs):
         # Check VIDEO support before submitting a billable request.
-        from comfy_api.input_impl import VideoFromFile
+        from comfy_api.input_impl import VideoFromFile  # Verify VIDEO support before submitting.
         import folder_paths
 
         if model != self.MODEL:
@@ -238,8 +270,26 @@ class ZiyuanVideoNode:
         output_path = output_dir / f"ziyuan_{uuid.uuid4().hex}.mp4"
         client = ZiyuanClient(api_base_url, api_key, 超时秒数, kwargs.get("_cancel_check", check_cancel),
                               kwargs.get("_bypass_proxy", True), kwargs.get("_poll_interval", 3))
+        if kwargs.get("_async"):
+            try:
+                submission = client.submit_generation("video", payload)
+            except Exception:
+                client.close()
+                raise
+            jobs.submit("video", lambda cancel: self._finish_video(
+                client, payload, output_path, submission, cancel), api_key)
+            return ("视频请求已提交；后台轮询与下载中，请使用同一密钥获取结果。",)
+        return self._finish_video(client, payload, output_path)
+
+    @staticmethod
+    def _finish_video(client, payload, output_path, submission=None, cancel=None):
+        from comfy_api.input_impl import VideoFromFile
+
+        if cancel is not None:
+            client.check_cancel = cancel
         try:
-            sources, task_id = client.generate("video", payload)
+            sources, task_id = (client.finish_generation("video", payload, submission)
+                                if submission is not None else client.generate("video", payload))
             client.save_video(sources[0], output_path)
             video = VideoFromFile(str(output_path))
             try:
@@ -247,7 +297,7 @@ class ZiyuanVideoNode:
             except Exception as exc:
                 output_path.unlink(missing_ok=True)
                 raise RuntimeError(f"任务 {task_id or '同步返回'} 下载结果无法解码为视频。") from exc
-            return video, str(output_path), f"生成完成；模型：{model}；任务 ID：{task_id or '同步返回'}"
+            return video, str(output_path), f"生成完成；模型：{payload['model']}；任务 ID：{task_id or '同步返回'}"
         finally:
             client.close()
 
@@ -517,34 +567,28 @@ class ZiyuanUnifiedVideoNode(ZiyuanVideoNode):
                                种子, 最大等待秒数, API密钥, API地址, 绕过代理, **kwargs)
 
 
-def submit_job(kind, node, inputs):
-    # Freeze reference inputs while the workflow continues on other branches.
-    inputs = {key: value.detach().cpu().clone() if isinstance(value, torch.Tensor) else value
-              for key, value in inputs.items()}
+def submit_job(node, inputs):
     api_key = jobs.resolve_api_key(inputs.get("API密钥", ""))
     inputs["API密钥"] = api_key
-    for key, value in inputs.items():
-        if isinstance(value, dict) and isinstance(value.get("waveform"), torch.Tensor):
-            inputs[key] = {**value, "waveform": value["waveform"].detach().cpu().clone()}
-    return (jobs.submit(kind, lambda cancel: node.run(**inputs, _cancel_check=cancel), api_key),)
+    return node.run(**inputs, _async=True)
 
 
 class ZiyuanImageSubmitNode(ZiyuanImageNode):
     FUNCTION = "submit"
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("任务编号",)
+    RETURN_NAMES = ("任务信息",)
 
     def submit(self, **kwargs):
-        return submit_job("image", ZiyuanImageNode(), kwargs)
+        return submit_job(ZiyuanImageNode(), kwargs)
 
 
 class ZiyuanUnifiedVideoSubmitNode(ZiyuanUnifiedVideoNode):
     FUNCTION = "submit"
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("任务编号",)
+    RETURN_NAMES = ("任务信息",)
 
     def submit(self, **kwargs):
-        return submit_job("video", ZiyuanUnifiedVideoNode(), kwargs)
+        return submit_job(ZiyuanUnifiedVideoNode(), kwargs)
 
 
 class ZiyuanImageFetchNode:
@@ -559,16 +603,25 @@ class ZiyuanImageFetchNode:
     def INPUT_TYPES(cls):
         return {"required": {
             "API密钥": ("STRING", {"default": "",
-                                 "tooltip": "使用提交时的 API 密钥，按提交顺序获取尚未取回的同类型任务；重复获取复用上一批结果。请先完成整批提交。留空使用 ZIYUAN_API_KEY。"}),
+                                 "tooltip": "使用提交时的 API 密钥，收集同类型任务。成功与失败分别处理，未完成的留待下次获取。留空使用 ZIYUAN_API_KEY。"}),
+            "最多等待秒数": ("INT", {"default": 300, "min": 1, "max": 7200,
+                                    "tooltip": "本次获取的总等待时间；到时返回已完成结果，其他任务继续在后台等待。"}),
         }}
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         return float("nan")
 
-    def fetch(self, API密钥):
-        results = jobs.fetch_batch("image", check_cancel, API密钥)
-        return tuple(list(values) for values in zip(*results))
+    def fetch(self, API密钥, 最多等待秒数=300):
+        return self.collect("image", API密钥, 最多等待秒数)
+
+    def collect(self, kind, api_key, max_wait):
+        results = jobs.fetch_batch(kind, check_cancel, api_key, max_wait)
+        outputs = tuple(list(values) for values in zip(*results))
+        if results.report:
+            print(f"[ziyuanAI] {results.report}")
+            outputs[-1][:] = [f"{status}\n{results.report}" for status in outputs[-1]]
+        return outputs
 
 
 class ZiyuanUnifiedVideoFetchNode(ZiyuanImageFetchNode):
@@ -576,9 +629,8 @@ class ZiyuanUnifiedVideoFetchNode(ZiyuanImageFetchNode):
     RETURN_NAMES = ZiyuanVideoNode.RETURN_NAMES
     OUTPUT_IS_LIST = (True, True, True)
 
-    def fetch(self, API密钥):
-        results = jobs.fetch_batch("video", check_cancel, API密钥)
-        return tuple(list(values) for values in zip(*results))
+    def fetch(self, API密钥, 最多等待秒数=300):
+        return self.collect("video", API密钥, 最多等待秒数)
 
 
 NODE_CLASS_MAPPINGS = {

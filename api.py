@@ -149,6 +149,10 @@ class ZiyuanClient:
         return body
 
     def generate(self, kind, payload):
+        submission = self.submit_generation(kind, payload)
+        return self.finish_generation(kind, payload, submission)
+
+    def submit_generation(self, kind, payload):
         endpoint = "/v1/videos" if kind == "video" else (
             "/v1/images/edits" if payload.get("image") else "/v1/images/generations"
         )
@@ -189,6 +193,9 @@ class ZiyuanClient:
             if files:
                 payload["metadata"] = json.dumps(payload["metadata"], ensure_ascii=False)
         body = self._json("POST", endpoint, payload, files=files)
+        return body
+
+    def finish_generation(self, kind, payload, body):
         task_id = task_field(body, "task_id", "taskId", "id")
         try:
             while True:

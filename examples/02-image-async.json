@@ -25,7 +25,7 @@
       ],
       "outputs": [
         {
-          "name": "任务编号",
+          "name": "任务信息",
           "type": "STRING",
           "links": null,
           "slot_index": 0
@@ -82,7 +82,7 @@
       "properties": {
         "Node name for S&R": "ZiyuanImageFetchNode"
       },
-      "widgets_values": [""]
+      "widgets_values": ["", 300]
     }
   ],
   "links": [],
